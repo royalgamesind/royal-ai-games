@@ -14,6 +14,8 @@ export default async function handler(req, res) {
   }
 
   try {
+    console.log("API KEY VALUE:", process.env.GEMINI_API_KEY);
+    
     const { message } = req.body;
 
     const response = await fetch(
