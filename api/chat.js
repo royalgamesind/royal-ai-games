@@ -1,7 +1,3 @@
-
-
-
-
 export default async function handler(req, res) {
 
   // ✅ CORS headers
@@ -35,21 +31,29 @@ export default async function handler(req, res) {
     );
 
     const data = await response.json();
-
     console.log("Gemini Raw Response:", JSON.stringify(data));
-if (data.candidates && data.candidates.length > 0) {
-  const reply =
-    data.candidates?.[0]?.content?.parts
-      ?.map(part => part.text)
-      ?.join(" ") || "AI returned empty text";
 
-  return res.status(200).json({ reply });
-}
-    
-    
+    if (data.candidates && data.candidates.length > 0) {
+      const reply =
+        data.candidates?.[0]?.content?.parts
+          ?.map(part => part.text)
+          ?.join(" ") || "AI returned empty text";
+
+      return res.status(200).json({ reply });
+    } else {
+      // 🔥 THIS WAS MISSING
+      return res.status(500).json({
+        error: "No candidates returned",
+        raw: data
+      });
+    }
 
   } catch (error) {
     console.error("Server Error:", error);
     return res.status(500).json({ error: "AI Server Error" });
   }
-}
+  }
+
+
+
+
