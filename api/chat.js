@@ -17,6 +17,19 @@ export default async function handler(req, res) {
     console.log("API KEY VALUE:", process.env.GEMINI_API_KEY);
     
     const { message } = req.body;
+    const finalPrompt = `
+You are the manager of a PlayStation and Xbox rental shop called Royal Games Neemuch.
+
+Here is today's real business data:
+${report}
+
+Owner is asking:
+${question}
+
+Analyze the business data and answer clearly.
+Give practical suggestions to improve bookings and profit.
+`;
+    
   const response = await fetch(
   "https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=" + process.env.GEMINI_API_KEY,
   {
