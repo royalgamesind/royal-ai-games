@@ -15,19 +15,15 @@ const firebaseConfig = {
 if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
 
-// ------------------ Helper: Safe API fetch ------------------
-async function safeFetch(url, options = {}) {
-  try {
-    const res = await fetch(url, options);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return await res.json();
-  } catch (err) {
-    console.error("API fetch error:", url, err);
-    return null;
-  }
+// ------------------ Safe fetch with timeout ------------------
+async function fetchWithTimeout(url, options={}, timeout=5000){
+  return Promise.race([
+    fetch(url, options).then(r=>r.json()).catch(()=>null),
+    new Promise(resolve => setTimeout(()=>resolve(null), timeout))
+  ]);
 }
 
-// ------------------ Helper: Build Shop Report ------------------
+// ------------------ Build Shop Report ------------------
 async function buildBusinessReport() {
   try {
     const bookingsSnap = await db.ref("bookings").once("value");
@@ -59,19 +55,19 @@ async function buildBusinessReport() {
   }
 }
 
-// ------------------ Helper: Handle Admin Commands ------------------
+// ------------------ Handle Admin Commands ------------------
 async function handleAdminCommand(replyText) {
   const dbRef = db.ref();
   let match;
 
   // Change booking status
   match = replyText.match(/Change booking (\w+) status to (\w+)/i);
-  if(match) {
+  if(match){
     const [_, bookingID, status] = match;
     const newStatus = status.charAt(0).toUpperCase() + status.slice(1).toLowerCase();
     const SAFE_STATUSES = ["Active","Completed","Cancelled"];
-    if(SAFE_STATUSES.includes(newStatus)) {
-      try { await dbRef.child(`bookings/${bookingID}`).update({status:newStatus}); } catch(e) { console.error(e); }
+    if(SAFE_STATUSES.includes(newStatus)){
+      try { await dbRef.child(`bookings/${bookingID}`).update({status:newStatus}); } catch(e){ console.error(e); }
       return `✅ Booking ${bookingID} updated to ${newStatus}`;
     }
     return `⚠️ Invalid status: ${status}`;
@@ -79,15 +75,15 @@ async function handleAdminCommand(replyText) {
 
   // Delete review
   match = replyText.match(/Delete review (\w+)/i);
-  if(match) {
+  if(match){
     const reviewID = match[1];
-    try { await dbRef.child(`reviews/${reviewID}`).remove(); } catch(e) { console.error(e); }
+    try { await dbRef.child(`reviews/${reviewID}`).remove(); } catch(e){ console.error(e); }
     return `✅ Review ${reviewID} deleted`;
   }
 
-  // Tag Bargainer
+  // Tag customer as Bargainer
   match = replyText.match(/Tag customer (\w+) as BARGAINER/i);
-  if(match) {
+  if(match){
     const phone = match[1];
     try { await dbRef.child(`customerNotes/${phone}`).set({tag:"BARGAINER", timestamp:Date.now()}); } catch(e){ console.error(e); }
     return `✅ Customer ${phone} tagged as BARGAINER`;
@@ -96,66 +92,62 @@ async function handleAdminCommand(replyText) {
   return replyText;
 }
 
-// ------------------ Main API Handler ------------------
-export default async function handler(req, res) {
+// ------------------ Main API ------------------
+export default async function handler(req, res){
   try {
     if(req.method !== "POST") return res.status(405).json({error:"Method not allowed"});
     const { message } = req.body;
     if(!message) return res.status(400).json({error:"No message provided"});
 
     let aiResponse = "";
-
-    // --------- Check if business-related ---------
     const businessKeywords = ["booking","vip","customer","revenue","bargainer","earnings","completed","cancelled"];
     const isBusiness = businessKeywords.some(k => message.toLowerCase().includes(k));
 
-    if(isBusiness) {
+    if(isBusiness){
+      // --- Business Query ---
       const report = await buildBusinessReport();
       const prompt = `You are a smart AI assistant. Answer owner questions based on shop data ONLY.\nOwner Question: ${message}\nShop Summary:\n${report}`;
       
-      const gemRes = await safeFetch("https://api.gemini.com/chat", {
+      const gemRes = await fetchWithTimeout("https://api.gemini.com/chat", {
         method: "POST",
         headers: { "Authorization": `Bearer ${process.env.GEMINI_API_KEY}`, "Content-Type": "application/json" },
         body: JSON.stringify({ message: prompt })
-      });
+      }, 7000);
 
-      aiResponse = gemRes?.reply ? await handleAdminCommand(gemRes.reply) : "AI could not understand the shop data.";
+      aiResponse = gemRes?.reply ? await handleAdminCommand(gemRes.reply) : "AI could not understand shop data.";
     } else {
-      // --------- General Internet Query ---------
-      const [news, wiki, duck, sports] = await Promise.all([
-        safeFetch(`https://newsapi.org/v2/everything?q=${encodeURIComponent(message)}&pageSize=3&apiKey=${process.env.NEWS_API_KEY}`),
-        safeFetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(message)}`),
-        safeFetch(`https://api.duckduckgo.com/?q=${encodeURIComponent(message)}&format=json&no_redirect=1`),
-        safeFetch(`https://www.thesportsdb.com/api/v1/json/${process.env.SPORTSDB_KEY}/searchvenues.php?v=${encodeURIComponent(message)}`)
+      // --- General Internet Query ---
+      const [news, wiki, duck] = await Promise.all([
+        process.env.NEWS_API_KEY ? fetchWithTimeout(`https://newsapi.org/v2/everything?q=${encodeURIComponent(message)}&pageSize=3&apiKey=${process.env.NEWS_API_KEY}`) : null,
+        fetchWithTimeout(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(message)}`),
+        fetchWithTimeout(`https://api.duckduckgo.com/?q=${encodeURIComponent(message)}&format=json&no_redirect=1`)
       ]);
 
-      // Combine results into a ChatGPT-style answer
-      aiResponse = `===== INTERNET RESULTS =====\n\n`;
-      if(news?.articles) aiResponse += `News:\n` + news.articles.map(a => `${a.title} - ${a.description}`).join("\n") + "\n\n";
-      if(wiki?.extract) aiResponse += `Wikipedia:\n${wiki.extract}\n\n`;
-      if(duck?.RelatedTopics) aiResponse += `DuckDuckGo:\n` + duck.RelatedTopics.slice(0,5).map(d=>d.Text).join("\n") + "\n\n";
-      if(sports?.venues) aiResponse += `Sports Venues:\n` + sports.venues.map(v=>v.strVenue).join("\n") + "\n";
-      
-      // Optional: fallback to Gemini if empty
-      if(!news && !wiki && !duck && !sports) {
-        const gemRes = await safeFetch("https://api.gemini.com/chat", {
+      if(news?.articles) aiResponse += "News:\n" + news.articles.map(a => `${a.title} - ${a.description}`).join("\n") + "\n\n";
+      if(wiki?.extract) aiResponse += "Wikipedia:\n" + wiki.extract + "\n\n";
+      if(duck?.RelatedTopics) aiResponse += "DuckDuckGo:\n" + duck.RelatedTopics.slice(0,5).map(d=>d.Text).join("\n") + "\n";
+
+      // fallback to Gemini if all null
+      if(!aiResponse){
+        const gemRes = await fetchWithTimeout("https://api.gemini.com/chat", {
           method: "POST",
           headers: { "Authorization": `Bearer ${process.env.GEMINI_API_KEY}`, "Content-Type": "application/json" },
           body: JSON.stringify({ message })
-        });
-        aiResponse = gemRes?.reply || "AI could not find an answer.";
+        }, 7000);
+        aiResponse = gemRes?.reply || "AI could not find an answer";
       }
     }
 
     res.status(200).json({ reply: aiResponse });
 
-  } catch(err) {
+  } catch(err){
     console.error("AI handler error:", err);
     res.status(500).json({ reply: "AI encountered an error. Check console." });
   }
-                                                            }
-        
+        }
+          
 
 
 
 
+          
