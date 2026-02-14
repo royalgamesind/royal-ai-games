@@ -1,6 +1,7 @@
 import firebase from "firebase/app";
 import "firebase/database";
 
+// ------------------ Firebase Initialization ------------------
 const firebaseConfig = {
   apiKey: process.env.FIREBASE_API_KEY,
   authDomain: process.env.FIREBASE_AUTH_DOMAIN,
@@ -14,127 +15,147 @@ const firebaseConfig = {
 if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
 
-export default async function handler(req, res) {
+// ------------------ Helper: Safe API fetch ------------------
+async function safeFetch(url, options = {}) {
   try {
-    const { query, type } = req.body;
-    if (!query) return res.status(400).json({ reply: "No query provided" });
+    const res = await fetch(url, options);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch (err) {
+    console.error("API fetch error:", url, err);
+    return null;
+  }
+}
 
-    let apiData = "";
+// ------------------ Helper: Build Shop Report ------------------
+async function buildBusinessReport() {
+  try {
+    const bookingsSnap = await db.ref("bookings").once("value");
+    const noteSnap = await db.ref("customerNotes").once("value");
+    const visitorSnap = await db.ref("dailyVisitors").once("value");
 
-    // ---------- STEP 1: fetch from external APIs ----------
-    switch(type) {
-      case "news": {
-        const NEWS_API_KEY = process.env.NEWS_API_KEY;
-        const url = `https://newsapi.org/v2/everything?q=${encodeURIComponent(query)}&pageSize=3&apiKey=${NEWS_API_KEY}`;
-        const data = await (await fetch(url)).json();
-        apiData = data.articles?.map(a => `${a.title} - ${a.description || ""}`).join("\n") || "No news found.";
-        break;
-      }
-      case "wikipedia": {
-        const WIKI_API_URL = process.env.WIKI_API_URL;
-        const searchUrl = `${WIKI_API_URL}?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&origin=*`;
-        const searchData = await (await fetch(searchUrl)).json();
-        if (searchData.query.search.length) {
-          const title = searchData.query.search[0].title;
-          const extractUrl = `${WIKI_API_URL}?action=query&prop=extracts&exintro=true&explaintext=true&titles=${encodeURIComponent(title)}&format=json&origin=*`;
-          const extractData = await (await fetch(extractUrl)).json();
-          apiData = Object.values(extractData.query.pages)[0].extract || "No summary found.";
-        } else apiData = "No Wikipedia page found.";
-        break;
-      }
-      case "duck": {
-        const DUCK_API = process.env.DUCKDUCKGO_URL;
-        const data = await (await fetch(`${DUCK_API}?q=${encodeURIComponent(query)}&format=json&no_redirect=1&no_html=1&skip_disambig=1`)).json();
-        apiData = data.AbstractText || "No result found on DuckDuckGo.";
-        break;
-      }
-      case "sports": {
-        const SPORTSDB_KEY = process.env.SPORTSDB_KEY;
-        const data = await (await fetch(`https://www.thesportsdb.com/api/v1/json/${SPORTSDB_KEY}/searchteams.php?t=${encodeURIComponent(query)}`)).json();
-        if (data.teams?.length) {
-          const t = data.teams[0];
-          apiData = `Team: ${t.strTeam}, League: ${t.strLeague}, Stadium: ${t.strStadium}`;
-        } else apiData = "No sports team found.";
-        break;
-      }
-      case "gemini":
-        apiData = query;
-        break;
-    }
+    let report = "", totalBookings = 0, totalRevenue = 0, completed = 0, cancelled = 0, active = 0;
+    const bargainCustomers = {};
+    noteSnap.forEach(n => { if(n.val().tag === "BARGAINER") bargainCustomers[n.key] = true; });
 
-    // ---------- STEP 2: Ask Gemini to generate response & possible commands ----------
-    const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-    const geminiRes = await fetch("https://api.google.com/gemini/ask", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${GEMINI_API_KEY}`
-      },
-      body: JSON.stringify({
-        message: `
-You are a smart AI assistant. Answer this query naturally, like ChatGPT.
-Query: "${query}"
-Context from API: "${apiData}"
-
-If the user requests a database change (bookings, customers, reviews), return command in the format:
-- Change booking <ID> status to <Status>
-- Tag customer <Phone> as BARGAINER
-- Delete review <ID>
-
-Otherwise, return only natural answer.
-`
-      })
+    bookingsSnap.forEach(c => {
+      const d = c.val();
+      totalBookings++;
+      totalRevenue += Number(d.finalPrice || 0);
+      if(d.status === "Completed") completed++;
+      if(d.status === "Cancelled") cancelled++;
+      if(d.status === "Active") active++;
+      const bargain = bargainCustomers[d.phone] ? "YES" : "NO";
+      report += `\nCustomer: ${d.name}\nPhone: ${d.phone}\nConsole: ${d.console}\nPaid: ₹${d.finalPrice}\nStatus: ${d.status}\nBargainer: ${bargain}\n---------------------`;
     });
 
-    const geminiData = await geminiRes.json();
-    let replyText = geminiData.reply || "No response from Gemini.";
+    let totalVisitors = 0, bookedVisitors = 0;
+    visitorSnap.forEach(day => { day.forEach(v => { totalVisitors++; if(v.val().booked) bookedVisitors++; }); });
 
-    // ---------- STEP 3: Detect & execute Firebase commands ----------
-    const SAFE_STATUSES = ["Active","Completed","Cancelled"];
-
-    // Change booking status
-    let match = replyText.match(/Change booking (\w+) status to (\w+)/i);
-    if (match) {
-      const [_, bookingID, status] = match;
-      const newStatus = status.charAt(0).toUpperCase() + status.slice(1).toLowerCase();
-      if (SAFE_STATUSES.includes(newStatus)) {
-        await db.ref(`bookings/${bookingID}`).update({ status: newStatus });
-        replyText += `\n✅ Booking ${bookingID} updated to ${newStatus}`;
-      }
-    }
-
-    // Delete review
-    match = replyText.match(/Delete review (\w+)/i);
-    if (match) {
-      const reviewID = match[1];
-      await db.ref(`reviews/${reviewID}`).remove();
-      replyText += `\n✅ Review ${reviewID} deleted`;
-    }
-
-    // Tag Bargainer
-    match = replyText.match(/Tag customer (\w+) as BARGAINER/i);
-    if (match) {
-      const phone = match[1];
-      await db.ref(`customerNotes/${phone}`).set({ tag: "BARGAINER", timestamp: Date.now() });
-      replyText += `\n✅ Customer ${phone} tagged as BARGAINER`;
-    }
-
-    // Show visitors who didn’t book today
-    if (/show me visitors who didn’t book/i.test(replyText)) {
-      const todayKey = new Date().toISOString().split("T")[0];
-      const snap = await db.ref(`dailyVisitors/${todayKey}`).once("value");
-      const nonBookers = [];
-      snap.forEach(child => { if (!child.val().booked) nonBookers.push(child.key); });
-      replyText += `\nVisitors who didn’t book today: ${nonBookers.join(", ") || "None"}`;
-    }
-
-    res.status(200).json({ reply: replyText });
-
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ reply: "Error processing query" });
+    return `===== BUSINESS STATS =====\nTotal Bookings: ${totalBookings}\nRevenue: ₹${totalRevenue}\nCompleted: ${completed}\nCancelled: ${cancelled}\nActive: ${active}\nVisitors: ${totalVisitors}\nConverted Customers: ${bookedVisitors}\n===== CUSTOMER DATA =====\n${report}`;
+  } catch(err) {
+    console.error("Business report error:", err);
+    return "[Failed to load business data]";
   }
+}
+
+// ------------------ Helper: Handle Admin Commands ------------------
+async function handleAdminCommand(replyText) {
+  const dbRef = db.ref();
+  let match;
+
+  // Change booking status
+  match = replyText.match(/Change booking (\w+) status to (\w+)/i);
+  if(match) {
+    const [_, bookingID, status] = match;
+    const newStatus = status.charAt(0).toUpperCase() + status.slice(1).toLowerCase();
+    const SAFE_STATUSES = ["Active","Completed","Cancelled"];
+    if(SAFE_STATUSES.includes(newStatus)) {
+      try { await dbRef.child(`bookings/${bookingID}`).update({status:newStatus}); } catch(e) { console.error(e); }
+      return `✅ Booking ${bookingID} updated to ${newStatus}`;
+    }
+    return `⚠️ Invalid status: ${status}`;
+  }
+
+  // Delete review
+  match = replyText.match(/Delete review (\w+)/i);
+  if(match) {
+    const reviewID = match[1];
+    try { await dbRef.child(`reviews/${reviewID}`).remove(); } catch(e) { console.error(e); }
+    return `✅ Review ${reviewID} deleted`;
+  }
+
+  // Tag Bargainer
+  match = replyText.match(/Tag customer (\w+) as BARGAINER/i);
+  if(match) {
+    const phone = match[1];
+    try { await dbRef.child(`customerNotes/${phone}`).set({tag:"BARGAINER", timestamp:Date.now()}); } catch(e){ console.error(e); }
+    return `✅ Customer ${phone} tagged as BARGAINER`;
+  }
+
+  return replyText;
+}
+
+// ------------------ Main API Handler ------------------
+export default async function handler(req, res) {
+  try {
+    if(req.method !== "POST") return res.status(405).json({error:"Method not allowed"});
+    const { message } = req.body;
+    if(!message) return res.status(400).json({error:"No message provided"});
+
+    let aiResponse = "";
+
+    // --------- Check if business-related ---------
+    const businessKeywords = ["booking","vip","customer","revenue","bargainer","earnings","completed","cancelled"];
+    const isBusiness = businessKeywords.some(k => message.toLowerCase().includes(k));
+
+    if(isBusiness) {
+      const report = await buildBusinessReport();
+      const prompt = `You are a smart AI assistant. Answer owner questions based on shop data ONLY.\nOwner Question: ${message}\nShop Summary:\n${report}`;
+      
+      const gemRes = await safeFetch("https://api.gemini.com/chat", {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${process.env.GEMINI_API_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ message: prompt })
+      });
+
+      aiResponse = gemRes?.reply ? await handleAdminCommand(gemRes.reply) : "AI could not understand the shop data.";
+    } else {
+      // --------- General Internet Query ---------
+      const [news, wiki, duck, sports] = await Promise.all([
+        safeFetch(`https://newsapi.org/v2/everything?q=${encodeURIComponent(message)}&pageSize=3&apiKey=${process.env.NEWS_API_KEY}`),
+        safeFetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(message)}`),
+        safeFetch(`https://api.duckduckgo.com/?q=${encodeURIComponent(message)}&format=json&no_redirect=1`),
+        safeFetch(`https://www.thesportsdb.com/api/v1/json/${process.env.SPORTSDB_KEY}/searchvenues.php?v=${encodeURIComponent(message)}`)
+      ]);
+
+      // Combine results into a ChatGPT-style answer
+      aiResponse = `===== INTERNET RESULTS =====\n\n`;
+      if(news?.articles) aiResponse += `News:\n` + news.articles.map(a => `${a.title} - ${a.description}`).join("\n") + "\n\n";
+      if(wiki?.extract) aiResponse += `Wikipedia:\n${wiki.extract}\n\n`;
+      if(duck?.RelatedTopics) aiResponse += `DuckDuckGo:\n` + duck.RelatedTopics.slice(0,5).map(d=>d.Text).join("\n") + "\n\n";
+      if(sports?.venues) aiResponse += `Sports Venues:\n` + sports.venues.map(v=>v.strVenue).join("\n") + "\n";
+      
+      // Optional: fallback to Gemini if empty
+      if(!news && !wiki && !duck && !sports) {
+        const gemRes = await safeFetch("https://api.gemini.com/chat", {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${process.env.GEMINI_API_KEY}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ message })
+        });
+        aiResponse = gemRes?.reply || "AI could not find an answer.";
       }
+    }
+
+    res.status(200).json({ reply: aiResponse });
+
+  } catch(err) {
+    console.error("AI handler error:", err);
+    res.status(500).json({ reply: "AI encountered an error. Check console." });
+  }
+                                                            }
+        
+
 
 
 
