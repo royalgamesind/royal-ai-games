@@ -1,42 +1,41 @@
-import fetch from "node-fetch";
+// api/chat.js
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
-  
-  const { query, isAdmin } = req.body;
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
 
-  if (!query) return res.status(400).json({ reply: "No query provided." });
+  const { query } = req.body;
+
+  if (!query) {
+    return res.status(400).json({ error: "No query provided" });
+  }
 
   try {
-    // -------- Gemini API Call --------
-    const geminiResp = await fetch("https://gemini.googleapis.com/v1beta2/models/text-bison-001:generateText", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${process.env.GEMINI_API_KEY}`
-      },
-      body: JSON.stringify({
-        prompt: query,
-        temperature: 0.7,
-        maxOutputTokens: 500
-      })
-    });
-
-    const geminiData = await geminiResp.json();
-    let reply = geminiData?.candidates?.[0]?.content || "";
-
-    // -------- NewsAPI Optional --------
-    if (/news/i.test(query)) {
-      const newsResp = await fetch(`https://newsapi.org/v2/everything?q=${encodeURIComponent(query)}&apiKey=${process.env.NEWS_API_KEY}`);
-      const newsData = await newsResp.json();
-      if(newsData.articles && newsData.articles.length > 0){
-        reply += "\n\nTop News:\n" + newsData.articles.slice(0,3).map(a=>`- ${a.title}`).join("\n");
+    // GEMINI AI request
+    const response = await fetch(
+      "https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=" + process.env.GEMINI_API_KEY,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [
+            {
+              parts: [{ text: query }]
+            }
+          ]
+        })
       }
-    }
+    );
 
-    res.status(200).json({ reply });
-  } catch(err) {
-    console.error("API ERROR:", err);
+    const data = await response.json();
+
+    // Get AI reply text
+    const aiText = data.candidates?.[0]?.content?.[0]?.text || "AI did not return a response.";
+
+    res.status(200).json({ reply: aiText });
+  } catch (err) {
+    console.error("Error contacting Gemini AI:", err);
     res.status(500).json({ reply: "Error contacting AI." });
   }
 }
