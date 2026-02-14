@@ -16,7 +16,9 @@ export default async function handler(req, res) {
   try {
     console.log("API KEY VALUE:", process.env.GEMINI_API_KEY);
     
-    const { message } = req.body;
+    
+    const { question, report } = req.body;
+    
     const finalPrompt = `
 You are the manager of a PlayStation and Xbox rental shop called Royal Games Neemuch.
 
