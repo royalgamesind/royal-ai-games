@@ -58,7 +58,7 @@ Owner question: ${message}
     }
   ]
 })
-          
+   ),     
         
 
     const data = await response.json();
@@ -66,15 +66,17 @@ Owner question: ${message}
 
     // ===== SMART TEXT EXTRACTION =====
     let reply = "";
+    reply = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    
 
-    if (data.candidates && data.candidates.length > 0) {
-
-      const parts = data.candidates[0]?.content?.parts;
-
-      if (parts && parts.length > 0) {
-        reply = parts.map(p => p.text).join(" ");
+    
       }
     }
+// clean formatting
+reply = reply.replace(/[*#_`>-]/g, "");
+reply = reply.replace(/\n{2,}/g, "\n");
+reply = reply.trim();
+
 
     // fallback
     if (!reply) {
