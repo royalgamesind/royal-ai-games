@@ -1,6 +1,6 @@
 export default async function handler(req, res) {
 
-  // CORS
+  // ===== CORS =====
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -11,23 +11,34 @@ export default async function handler(req, res) {
 
   try {
 
-    const { message } = req.body;
+    const { message } = req.body || {};
 
     if (!message) {
       return res.status(400).json({ error: "No message received" });
     }
 
+    // ===== allow greetings but block tiny spam =====
+    const small = String(message).trim().toLowerCase();
+    const greetings = [
+      "hi","hii","hello","hey","helo","namaste","namaskar","yo","good morning","good evening","gm","ge"
+    ];
+
+    if (small.length < 5 && !greetings.includes(small)) {
+      return res.status(200).json({ reply: "Bro thoda proper question likho 😊" });
+    }
+
+    // ===== GEMINI CALL =====
     const response = await fetch(
       "https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=" + process.env.GEMINI_API_KEY,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-  contents: [
-    {
-      role: "user",
-      parts: [{
-        text: `
+          contents: [
+            {
+              role: "user",
+              parts: [{
+                text: `
 You are "Royal AI", a personal assistant for the owner of Royal Games (a PS5 & Xbox rental business in Neemuch).
 
 Your behavior rules:
@@ -46,37 +57,32 @@ Business understanding:
 The owner asks about bookings, customers, bargaining, profits, and growth.
 If data is provided, analyze it simply and directly.
 
-Very Important:
-If you don't know something from the data, say:
+If the owner greets you (hi, hello, hey), greet back warmly and ask how you can help with the business.
+
+If you don't know something from the data, say exactly:
 "I don't see that in your records yet."
 
 Now answer the owner's question:
 
 Owner question: ${message}
-`
-      }]
-    }
-  ]
-})
-   ),     
-        
+                `
+              }]
+            }
+          ]
+        })
+      }
+    );
 
     const data = await response.json();
     console.log("Gemini FULL:", JSON.stringify(data));
 
     // ===== SMART TEXT EXTRACTION =====
     let reply = "";
-    reply = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-    
 
-    
-      }
+    if (data?.candidates?.length) {
+      const parts = data.candidates[0]?.content?.parts;
+      if (parts?.length) reply = parts.map(p => p.text || "").join(" ");
     }
-// clean formatting
-reply = reply.replace(/[*#_`>-]/g, "");
-reply = reply.replace(/\n{2,}/g, "\n");
-reply = reply.trim();
-
 
     // fallback
     if (!reply) {
@@ -90,11 +96,12 @@ reply = reply.trim();
     return res.status(500).json({ error: "AI Server Error" });
   }
 }
-
-
-
-
   
+
+
+
+
+    
 
 
 
