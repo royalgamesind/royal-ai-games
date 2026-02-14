@@ -1,107 +1,100 @@
+// /api/fetchInfo.js
 export default async function handler(req, res) {
-
-  // ===== CORS =====
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
-  if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST")
-    return res.status(405).json({ error: "Method Not Allowed" });
-
   try {
+    const { query, type } = req.body;
+    if (!query) return res.status(400).json({ reply: "No query provided" });
 
-    const { message } = req.body || {};
-
-    if (!message) {
-      return res.status(400).json({ error: "No message received" });
-    }
-
-    // ===== allow greetings but block tiny spam =====
-    const small = String(message).trim().toLowerCase();
-    const greetings = [
-      "hi","hii","hello","hey","helo","namaste","namaskar","yo","good morning","good evening","gm","ge"
-    ];
-
-    if (small.length < 5 && !greetings.includes(small)) {
-      return res.status(200).json({ reply: "Bro thoda proper question likho 😊" });
-    }
-
-    // ===== GEMINI CALL =====
-    const response = await fetch(
-      "https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=" + process.env.GEMINI_API_KEY,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [
-            {
-              role: "user",
-              parts: [{
-                text: `
-You are "Royal AI", a personal assistant for the owner of Royal Games (a PS5 & Xbox rental business in Neemuch).
-
-Your behavior rules:
-- Talk like a helpful human assistant, not a teacher or consultant
-- Give SHORT and clear answers (2–5 lines max)
-- No headings
-- No markdown
-- No ###
-- No long paragraphs
-- No essays
-- No professional report style
-- Reply friendly and simple, like ChatGPT chat
-- Address the owner casually (like: "Bro", "You", "Your booking")
-
-Business understanding:
-The owner asks about bookings, customers, bargaining, profits, and growth.
-If data is provided, analyze it simply and directly.
-
-If the owner greets you (hi, hello, hey), greet back warmly and ask how you can help with the business.
-
-If you don't know something from the data, say exactly:
-"I don't see that in your records yet."
-
-Now answer the owner's question:
-
-Owner question: ${message}
-                `
-              }]
-            }
-          ]
-        })
-      }
-    );
-
-    const data = await response.json();
-    console.log("Gemini FULL:", JSON.stringify(data));
-
-    // ===== SMART TEXT EXTRACTION =====
     let reply = "";
 
-    if (data?.candidates?.length) {
-      const parts = data.candidates[0]?.content?.parts;
-      if (parts?.length) reply = parts.map(p => p.text || "").join(" ");
+    switch (type) {
+      // ---------- NEWS ----------
+      case "news": {
+        const NEWS_API_KEY = process.env.NEWS_API_KEY;
+        const url = `https://newsapi.org/v2/everything?q=${encodeURIComponent(query)}&pageSize=3&apiKey=${NEWS_API_KEY}`;
+        const response = await fetch(url);
+        const data = await response.json();
+        if (data.articles && data.articles.length > 0) {
+          reply = data.articles.map(a => `${a.title} (${a.source.name})`).join("\n\n");
+        } else {
+          reply = "No news found.";
+        }
+        break;
+      }
+
+      // ---------- WIKIPEDIA ----------
+      case "wikipedia": {
+        const WIKI_API_URL = process.env.WIKI_API_URL;
+        const searchUrl = `${WIKI_API_URL}?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&origin=*`;
+        const searchRes = await fetch(searchUrl);
+        const searchData = await searchRes.json();
+        if (searchData.query.search && searchData.query.search.length > 0) {
+          const title = searchData.query.search[0].title;
+          const extractUrl = `${WIKI_API_URL}?action=query&prop=extracts&exintro=true&explaintext=true&titles=${encodeURIComponent(title)}&format=json&origin=*`;
+          const extractRes = await fetch(extractUrl);
+          const extractData = await extractRes.json();
+          const page = Object.values(extractData.query.pages)[0];
+          reply = page.extract || "No summary found.";
+        } else {
+          reply = "No Wikipedia page found.";
+        }
+        break;
+      }
+
+      // ---------- DUCKDUCKGO ----------
+      case "duck": {
+        const DUCK_API = process.env.DUCKDUCKGO_URL;
+        const url = `${DUCK_API}?q=${encodeURIComponent(query)}&format=json&no_redirect=1&no_html=1&skip_disambig=1`;
+        const response = await fetch(url);
+        const data = await response.json();
+        reply = data.AbstractText || "No result found on DuckDuckGo.";
+        break;
+      }
+
+      // ---------- SPORTSDB ----------
+      case "sports": {
+        const SPORTSDB_KEY = process.env.SPORTSDB_KEY;
+        const url = `https://www.thesportsdb.com/api/v1/json/${SPORTSDB_KEY}/searchteams.php?t=${encodeURIComponent(query)}`;
+        const response = await fetch(url);
+        const data = await response.json();
+        if (data.teams && data.teams.length > 0) {
+          const team = data.teams[0];
+          reply = `Team: ${team.strTeam}\nLeague: ${team.strLeague}\nStadium: ${team.strStadium}\nDescription: ${team.strDescriptionEN?.substring(0, 200)}...`;
+        } else {
+          reply = "No sports team found.";
+        }
+        break;
+      }
+
+      // ---------- GOOGLE GEMINI ----------
+      case "gemini": {
+        const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+        const url = "https://api.google.com/gemini/ask"; // Replace with actual Gemini API endpoint
+        const response = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${GEMINI_API_KEY}`
+          },
+          body: JSON.stringify({ message: query })
+        });
+        const data = await response.json();
+        reply = data.reply || "No response from Gemini.";
+        break;
+      }
+
+      default:
+        reply = "Unknown query type. Use 'news', 'wikipedia', 'duck', 'sports', or 'gemini'.";
     }
 
-    // fallback
-    if (!reply) {
-      reply = "AI samajh nahi paaya. Dubara question thoda clearly likho.";
-    }
+    res.status(200).json({ reply });
 
-    return res.status(200).json({ reply });
-
-  } catch (error) {
-    console.error("SERVER ERROR:", error);
-    return res.status(500).json({ error: "AI Server Error" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ reply: "Error processing query." });
   }
 }
-  
 
 
-
-
-    
 
 
 
